@@ -1,50 +1,12 @@
-// Upgrade NOTE: commented out 'float4x4 _WorldToCamera', a built-in variable
-// Upgrade NOTE: replaced '_WorldToCamera' with 'unity_WorldToCamera'
-
 #ifndef __AMBIENT_OCCLUSION__
 #define __AMBIENT_OCCLUSION__
 
 #include "UnityCG.cginc"
 #include "Common.cginc"
 
-// --------
-// Options for further customization
-// --------
-
-// By default, a 5-tap Gaussian with the linear sampling technique is used
-// in the bilateral noise filter. It can be replaced with a 7-tap Gaussian
-// with adaptive sampling by enabling the macro below. Although the
-// differences are not noticeable in most cases, it may provide preferable
-// results with some special usage (e.g. NPR without textureing).
-// #define BLUR_HIGH_QUALITY
-
-// By default, a fixed sampling pattern is used in the AO estimator. Although
-// this gives preferable results in most cases, a completely random sampling
-// pattern could give aesthetically better results. Disable the macro below
-// to use such a random pattern instead of the fixed one.
-#define FIX_SAMPLING_PATTERN
-
-// The SampleNormal function normalizes samples from G-buffer because
-// they're possibly unnormalized. We can eliminate this if it can be said
-// that there is no wrong shader that outputs unnormalized normals.
-// #define VALIDATE_NORMALS
-
-// The constant below determines the contrast of occlusion. This allows
-// users to control over/under occlusion. At the moment, this is not exposed
-// to the editor because it�s rarely useful.
-static const float kContrast = 0.6;
-
 // The constant below controls the geometry-awareness of the bilateral
 // filter. The higher value, the more sensitive it is.
 static const float kGeometryCoeff = 0.8;
-
-// The constants below are used in the AO estimator. Beta is mainly used
-// for suppressing self-shadowing noise, and Epsilon is used to prevent
-// calculation underflow. See the paper (Morgan 2011 http://goo.gl/2iz3P)
-// for further details of these constants.
-static const float kBeta = 0.002;
-
-// --------
 
 // System built-in variables
 sampler2D _CameraGBufferTexture2;
@@ -53,22 +15,59 @@ sampler2D _CameraDepthNormalsTexture;
 
 float4 _CameraDepthTexture_ST;
 
-// Sample count
-#if !defined(SHADER_API_GLES)
-int _SampleCount;
-#else
-// GLES2: In many cases, dynamic looping is not supported.
-static const int _SampleCount = 3;
-#endif
-
 // Source texture properties
 sampler2D _OcclusionTexture;
 float4 _OcclusionTexture_TexelSize;
 
 // Other parameters
 half _Intensity;
-float _Radius;
+half2 _Radius;
+half2 _Slices;
+half2 _Samples;
 float _Downsample;
+
+#if !defined(SHADER_API_PSSL) && !defined(SHADER_API_XBOXONE)
+
+// Use the standard sqrt as default.
+float ao_sqrt(float x)
+{
+    return sqrt(x);
+}
+
+// Fast approximation of acos from Lagarde 2014 http://goo.gl/H9Qdom
+float ao_acos(float x)
+{
+#if 0
+    // Polynomial degree 2
+    float ax = abs(x);
+    float y = (1.56467 - 0.155972 * ax) * ao_sqrt(1 - ax);
+    return x < 0 ? UNITY_PI - y : y;
+#else
+    // Polynomial degree 3
+    float ax = abs(x);
+    float y = ((0.0464619 * ax - 0.201877) * ax + 1.57018) * ao_sqrt(1 - ax);
+    return x < 0 ? UNITY_PI - y : y;
+#endif
+}
+
+#else
+
+// On PS4 and Xbox One, use the optimized sqrt/acos functions
+// from the original GTAO paper.
+
+float ao_sqrt(float x)
+{
+    return asfloat(0x1FBD1DF5 + (asint(x) >> 1));
+}
+
+float ao_acos(float x)
+{
+    float y = -0.156583 * abs(x) + UNITY_PI / 2;
+    y *= ao_sqrt(1 - abs(x));
+    return x < 0 ? UNITY_PI - y : y;
+}
+
+#endif
 
 // Accessors for packed AO/normal buffer
 fixed4 PackAONormal(fixed ao, fixed3 n)
@@ -103,9 +102,9 @@ float CheckBounds(float2 uv, float d)
 float SampleDepth(float2 uv)
 {
 #if defined(SOURCE_GBUFFER) || defined(SOURCE_DEPTH)
-    float d = LinearizeDepth(SAMPLE_DEPTH_TEXTURE(_CameraDepthTexture, uv));
+    float d = LinearizeDepth(tex2Dlod(_CameraDepthTexture, float4(uv, 0, 0)).r);
 #else
-    float4 cdn = tex2D(_CameraDepthNormalsTexture, uv);
+    float4 cdn = tex2Dlod(_CameraDepthNormalsTexture, float4(uv, 0, 0));
     float d = DecodeFloatRG(cdn.zw);
 #endif
     return d * _ProjectionParams.z + CheckBounds(uv, d);
@@ -114,7 +113,7 @@ float SampleDepth(float2 uv)
 float3 SampleNormal(float2 uv)
 {
 #if defined(SOURCE_GBUFFER)
-    float3 norm = tex2D(_CameraGBufferTexture2, uv).xyz;
+    float3 norm = tex2Dlod(_CameraGBufferTexture2, float4(uv, 0, 0)).xyz;
     norm = norm * 2 - any(norm); // gets (0,0,0) when norm == 0
     norm = mul((float3x3)unity_WorldToCamera, norm);
 #if defined(VALIDATE_NORMALS)
@@ -122,7 +121,7 @@ float3 SampleNormal(float2 uv)
 #endif
     return norm;
 #else
-    float4 cdn = tex2D(_CameraDepthNormalsTexture, uv);
+    float4 cdn = tex2Dlod(_CameraDepthNormalsTexture, float4(uv, 0, 0));
     return DecodeViewNormalStereo(cdn) * float3(1.0, 1.0, -1.0);
 #endif
 }
@@ -133,7 +132,7 @@ float SampleDepthNormal(float2 uv, out float3 normal)
     normal = SampleNormal(uv);
     return SampleDepth(uv);
 #else
-    float4 cdn = tex2D(_CameraDepthNormalsTexture, uv);
+    float4 cdn = tex2Dlod(_CameraDepthNormalsTexture, float4(uv, 0, 0));
     normal = DecodeViewNormalStereo(cdn) * float3(1.0, 1.0, -1.0);
     float d = DecodeFloatRG(cdn.zw);
     return d * _ProjectionParams.z + CheckBounds(uv, d);
@@ -202,87 +201,104 @@ float3 ReconstructViewPos(float2 uv, float depth, float2 p11_22, float2 p13_31)
     return float3((uv * 2.0 - 1.0 - p13_31) / p11_22 * CheckPerspective(depth), depth);
 }
 
-// Sample point picker
-float3 PickSamplePoint(float2 uv, float index)
-{
-    // Uniformaly distributed points on a unit sphere http://goo.gl/X2F1Ho
-#if defined(FIX_SAMPLING_PATTERN)
-    float gn = GradientNoise(uv * _Downsample);
-    float u = frac(UVRandom(0.0, index) + gn) * 2.0 - 1.0;
-    float theta = (UVRandom(1.0, index) + gn) * UNITY_PI_2;
-#else
-    float u = UVRandom(uv.x + _Time.x, uv.y + index) * 2.0 - 1.0;
-    float theta = UVRandom(-uv.x - _Time.x, uv.y + index) * UNITY_PI_2;
-#endif
-    float3 v = float3(CosSin(theta) * sqrt(1.0 - u * u), u);
-    // Make them distributed between [0, _Radius]
-    float l = sqrt((index + 1.0) / _SampleCount) * _Radius;
-    return v * l;
-}
-
-//
-// Distance-based AO estimator based on Morgan 2011 http://goo.gl/2iz3P
-//
+// Ground Truth Ambient Occlusion integrator based on Jimenez et al. 2016
+// https://goo.gl/miMNXu
 half4 FragAO(VaryingsMultitex i) : SV_Target
 {
-    float2 uv = i.uv;
+    // Center sample.
+    float3 n0;
+    float d0 = SampleDepthNormal(UnityStereoScreenSpaceUVAdjust(i.uv, _CameraDepthTexture_ST), n0);
 
-    // Parameters used in coordinate conversion
-    float3x3 proj = (float3x3)unity_CameraProjection;
+    // Early Z rejection.
+    if (d0 >= _ProjectionParams.z * 0.999) return PackAONormal(0, n0);
+
+    // Parameters used for inverse projection.
     float2 p11_22 = float2(unity_CameraProjection._11, unity_CameraProjection._22);
     float2 p13_31 = float2(unity_CameraProjection._13, unity_CameraProjection._23);
 
-    // View space normal and depth
-    float3 norm_o;
-    float depth_o = SampleDepthNormal(UnityStereoScreenSpaceUVAdjust(uv, _CameraDepthTexture_ST), norm_o);
+    // p0: View space position of the center sample.
+    // v0: Normalized view vector.
+    float3 p0 = ReconstructViewPos(i.uv01, d0, p11_22, p13_31);
+    float3 v0 = normalize(-p0);
 
-#if defined(SOURCE_DEPTHNORMALS)
-    // Offset the depth value to avoid precision error.
-    // (depth in the DepthNormals mode has only 16-bit precision)
-    depth_o -= _ProjectionParams.z / 65536;
-#endif
+    // Screen space search radius. Up to 1/4 screen width.
+    float radius = _Radius.x * unity_CameraProjection._11 * 0.5 / p0.z;
+    radius = min(radius, 0.25) * _MainTex_TexelSize.z;
 
-    // Reconstruct the view-space position.
-    float3 vpos_o = ReconstructViewPos(i.uv01, depth_o, p11_22, p13_31);
+    // Step width (interval between samples).
+    float stepw = max(1.5, radius * _Samples.y);
 
-    float ao = 0.0;
+    // Interleaved gradient noise (used for dithering).
+    half dither = GradientNoise(i.uv01);
 
-    for (int s = 0; s < _SampleCount; s++)
+    // AO value wll be accumulated into here.
+    float ao = 0;
+
+    // Slice loop
+    UNITY_LOOP for (half sl01 = _Slices.y * 0.5; sl01 < 1; sl01 += _Slices.y)
     {
-        // Sample point
-#if defined(SHADER_API_D3D11)
-        // This 'floor(1.0001 * s)' operation is needed to avoid a NVidia
-        // shader issue. This issue is only observed on DX11.
-        float3 v_s1 = PickSamplePoint(uv, floor(1.0001 * s));
-#else
-        float3 v_s1 = PickSamplePoint(uv, s);
-#endif
-        v_s1 = faceforward(v_s1, -norm_o, v_s1);
-        float3 vpos_s1 = vpos_o + v_s1;
+        // Slice plane angle and sampling direction.
+        half phi = (sl01 + dither) * UNITY_PI;
+        half2 cossin_phi = CosSin(phi);
+        float2 duv = _MainTex_TexelSize.xy * cossin_phi * stepw;
 
-        // Reproject the sample point
-        float3 spos_s1 = mul(proj, vpos_s1);
-        float2 uv_s1_01 = (spos_s1.xy / CheckPerspective(vpos_s1.z) + 1.0) * 0.5;
+        // Start from one step further.
+        float2 uv1 = i.uv01 + duv * (0.5 + sl01);
+        float2 uv2 = i.uv01 - duv * (0.5 + sl01);
 
-        // Depth at the sample point
-        float depth_s1 = SampleDepth(UnityStereoScreenSpaceUVAdjust(uv_s1_01, _CameraDepthTexture_ST));
+        // Determine the horizons.
+        float h1 = -1;
+        float h2 = -1;
 
-        // Relative position of the sample point
-        float3 vpos_s2 = ReconstructViewPos(uv_s1_01, depth_s1, p11_22, p13_31);
-        float3 v_s2 = vpos_s2 - vpos_o;
+        UNITY_LOOP for (half hr = stepw * 0.5; hr < radius; hr += stepw)
+        {
+            // Sample the depths.
+            float z1 = SampleDepth(UnityStereoScreenSpaceUVAdjust(uv1, _CameraDepthTexture_ST));
+            float z2 = SampleDepth(UnityStereoScreenSpaceUVAdjust(uv2, _CameraDepthTexture_ST));
 
-        // Estimate the obscurance value
-        float a1 = max(dot(v_s2, norm_o) - kBeta * depth_o, 0.0);
-        float a2 = dot(v_s2, v_s2) + EPSILON;
-        ao += a1 / a2;
+            // View space difference from the center point.
+            float3 d1 = ReconstructViewPos(uv1, z1, p11_22, p13_31) - p0;
+            float3 d2 = ReconstructViewPos(uv2, z2, p11_22, p13_31) - p0;
+            float l_d1 = length(d1);
+            float l_d2 = length(d2);
+
+            // Distance based attenuation.
+            half atten1 = saturate(l_d1 * 2 * _Radius.y - 1);
+            half atten2 = saturate(l_d2 * 2 * _Radius.y - 1);
+
+            // Calculate the cosine and compare with the horizons.
+            h1 = max(h1, lerp(dot(d1, v0) / l_d1, -1, atten1));
+            h2 = max(h2, lerp(dot(d2, v0) / l_d2, -1, atten2));
+
+            uv1 += duv;
+            uv2 -= duv;
+        }
+
+        // Convert the horizons into angles between the view vector.
+        h1 = -ao_acos(h1);
+        h2 = +ao_acos(h2);
+
+        // Project the normal vector onto the slice plane.
+        float3 dv = float3(cossin_phi, 0);
+        float3 sn = normalize(cross(v0, dv));
+        float3 np = n0 - sn * dot(sn, n0);
+
+        // Calculate the angle between the projected normal and the view vector.
+        float n = ao_acos(min(dot(np, v0) / length(np), 1));
+        if (dot(np, dv) > 0) n = -n;
+
+        // Clamp the horizon angles with the normal hemisphere.
+        h1 = n + max(h1 - n, -0.5 * UNITY_PI);
+        h2 = n + min(h2 - n,  0.5 * UNITY_PI);
+
+        // Cosine weighting GTAO integrator.
+        float2 cossin_n = CosSin(n);
+        float a1 = -cos(2 * h1 - n) + cossin_n.x + 2 * h1 * cossin_n.y;
+        float a2 = -cos(2 * h2 - n) + cossin_n.x + 2 * h2 * cossin_n.y;
+        ao += (a1 + a2) / 4 * length(np);
     }
 
-    ao *= _Radius; // intensity normalization
-
-    // Apply other parameters.
-    ao = pow(ao * _Intensity / _SampleCount, kContrast);
-
-    return PackAONormal(ao, norm_o);
+    return PackAONormal((1 - ao * _Slices.y) * _Intensity, n0);
 }
 
 // Geometry-aware separable bilateral filter

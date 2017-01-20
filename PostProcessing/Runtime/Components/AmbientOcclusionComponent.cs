@@ -11,7 +11,8 @@ namespace UnityEngine.PostProcessing
             internal static readonly int _Intensity         = Shader.PropertyToID("_Intensity");
             internal static readonly int _Radius            = Shader.PropertyToID("_Radius");
             internal static readonly int _Downsample        = Shader.PropertyToID("_Downsample");
-            internal static readonly int _SampleCount       = Shader.PropertyToID("_SampleCount");
+            internal static readonly int _Samples           = Shader.PropertyToID("_Samples");
+            internal static readonly int _Slices            = Shader.PropertyToID("_Slices");
             internal static readonly int _OcclusionTexture1 = Shader.PropertyToID("_OcclusionTexture1");
             internal static readonly int _OcclusionTexture2 = Shader.PropertyToID("_OcclusionTexture2");
             internal static readonly int _OcclusionTexture  = Shader.PropertyToID("_OcclusionTexture");
@@ -99,9 +100,14 @@ namespace UnityEngine.PostProcessing
             var material = context.materialFactory.Get(k_ShaderString);
             material.shaderKeywords = null;
             material.SetFloat(Uniforms._Intensity, settings.intensity);
-            material.SetFloat(Uniforms._Radius, settings.radius);
+            material.SetVector(Uniforms._Radius, new Vector2(settings.radius, 1.0f / settings.radius));
             material.SetFloat(Uniforms._Downsample, settings.downsampling ? 0.5f : 1f);
-            material.SetInt(Uniforms._SampleCount, (int)settings.sampleCount);
+
+            var sliceCount = (int)settings.sampleCount / 2 + 1;
+            material.SetVector(Uniforms._Slices, new Vector2(sliceCount, 1.0f / sliceCount));
+
+            var sampleCount = (int)settings.sampleCount + 1;
+            material.SetVector(Uniforms._Samples, new Vector2(sampleCount, 1.0f / sampleCount));
 
             int tw = context.width;
             int th = context.height;
