@@ -12,14 +12,15 @@ namespace UnityEngine.Rendering.PostProcessing
         [Range(4, 32), Tooltip("The amount of sample points, which affects quality and performances.")]
         public IntParameter sampleCount = new IntParameter { value = 10 };
 
+        [Tooltip("Enable the effect in edit mode.")]
+        public BoolParameter previewOnEdit = new BoolParameter { value = false };
+
         public override bool IsEnabledAndSupported(PostProcessRenderContext context)
         {
             return enabled.value
                 && shutterAngle.value > 0f
             #if UNITY_EDITOR
-                // Don't render motion blur preview when the editor is not playing as it can in some
-                // cases results in ugly artifacts (i.e. when resizing the game view).
-                && Application.isPlaying
+                && (previewOnEdit || Application.isPlaying)
             #endif
                 && SystemInfo.supportsMotionVectors
                 && SystemInfo.SupportsRenderTextureFormat(RenderTextureFormat.RGHalf)
